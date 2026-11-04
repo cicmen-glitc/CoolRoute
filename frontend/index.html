@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7f2">
+    <meta name="description" content="Находите более прохладные маршруты пешком и на велосипеде и помогайте городу бороться с жарой.">
+    <title>CoolRoute — прохладный путь по городу</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://unpkg.com">
+    <link rel="preconnect" href="https://tile.openstreetmap.org">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="CoolRoute — на главную">
+          <span class="brand-mark" aria-hidden="true">↗</span>
+          <span>cool<span>route</span></span>
+        </a>
+        <div class="topbar-center"><span class="live-dot"></span> Город прохладнее начинается с маршрута</div>
+        <div class="city-picker-wrap">
+          <button class="city-button" id="cityButton" type="button" aria-label="Выбрать город" aria-expanded="false" aria-controls="cityPicker">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>
+            <span id="cityLabel">Алматы</span><span class="chevron">⌄</span>
+          </button>
+          <section class="city-picker" id="cityPicker" aria-label="Выбор города" hidden>
+            <form id="citySearchForm" class="city-search-form">
+              <label class="sr-only" for="citySearchInput">Название города</label>
+              <input id="citySearchInput" type="search" placeholder="Город на любом языке — например, Astana" minlength="2" maxlength="120" autocomplete="off" required>
+              <button type="submit" id="citySearchButton">Найти</button>
+            </form>
+            <p class="city-search-status" id="citySearchStatus" role="status" aria-live="polite">Введите город и нажмите «Найти».</p>
+            <ul class="city-search-results" id="citySearchResults"></ul>
+          </section>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar">
+          <section class="intro">
+            <div class="eyebrow"><span class="eyebrow-line"></span> ГОРОДСКАЯ ПРОХЛАДА</div>
+            <h1>Путь, где<br>дышится <em>легче.</em></h1>
+            <p class="intro-copy">Выберите маршрут пешком или на велосипеде — с зеленью, водой и более комфортным путём.</p>
+          </section>
+
+          <section class="route-card" aria-labelledby="routeTitle">
+            <div class="section-heading">
+              <div><span class="section-kicker">ВАШ МАРШРУТ</span><h2 id="routeTitle">Куда направимся?</h2></div>
+              <div class="transport-switch" role="group" aria-label="Способ передвижения">
+                <button class="transport-button active" id="footMode" type="button" aria-pressed="true" data-mode="foot">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="14" cy="4" r="2"/><path d="m12 8-3 4 3 2-1 6m1-8 4 2 2 4m-9-6-3 5-2 1"/></svg>
+                  Пешком
+                </button>
+                <button class="transport-button" id="bikeMode" type="button" aria-pressed="false" data-mode="bike">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="m12 7 3 10H8l4-7h4m-5-3h3"/></svg>
+                  Велосипед
+                </button>
+              </div>
+            </div>
+            <form id="routeForm">
+              <div class="location-fields">
+                <span class="route-rail" aria-hidden="true"><i></i><b></b></span>
+                <label class="location-input">
+                  <span class="sr-only">Точка отправления</span>
+                  <input id="startInput" type="text" placeholder="Откуда — на любом языке" autocomplete="off" required>
+                  <button class="locate-button" id="locateButton" type="button" title="Моё местоположение" aria-label="Использовать моё местоположение">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
+                  </button>
+                </label>
+                <label class="location-input">
+                  <span class="sr-only">Точка назначения</span>
+                  <input id="endInput" type="text" placeholder="Куда — на любом языке" autocomplete="off" required>
+                </label>
+              </div>
+              <p class="location-status" id="locationStatus" role="status" aria-live="polite"></p>
+              <div class="field-divider"></div>
+              <div class="map-hint"><span class="hint-icon">⌖</span> Или нажмите на карту, чтобы поставить точки</div>
+              <button class="primary-button" id="routeButton" type="submit">
+                <span>Найти прохладный путь</span><span class="button-arrow">↗</span>
+              </button>
+              <p class="error-message" id="routeError" role="alert"></p>
+            </form>
+
+            <div class="route-results" id="routeResults" hidden>
+              <div class="result-heading"><span class="section-kicker">МАРШРУТЫ</span><button class="text-button" id="clearRoutes" type="button">Сбросить</button></div>
+              <div class="route-option active" id="coolOption" role="button" tabindex="0">
+                <span class="route-option-icon cool-icon">✳</span>
+                <span class="route-option-copy"><strong>Прохладный</strong><small id="coolMeta">Подбираем маршрут…</small></span>
+                <span class="route-option-score" id="coolScore">—</span>
+              </div>
+              <div class="route-option" id="normalOption" role="button" tabindex="0">
+                <span class="route-option-icon normal-icon">↗</span>
+                <span class="route-option-copy"><strong>Короткий</strong><small id="normalMeta">Обычный путь</small></span>
+                <span class="route-option-score normal-score" id="normalScore">—</span>
+              </div>
+              <div class="comfort-note"><span>✦</span> Оценка учитывает длину, время, температуру и отмеченные рядом зелёные зоны и воду. Это ориентир прототипа, не медицинская оценка безопасности.</div>
+            </div>
+          </section>
+
+          <section class="weather-card">
+            <div class="weather-top"><span class="section-kicker">СЕЙЧАС В ГОРОДЕ</span><span class="weather-sun" aria-hidden="true">☼</span></div>
+            <div class="weather-main"><strong id="temperatureValue">—°</strong><span>Температура воздуха<br><small id="feelsLike">Загружаем погоду…</small></span></div>
+            <div class="heat-meter"><span></span></div>
+            <div class="weather-caption"><span>Прохладно</span><span>Жарко</span></div>
+          </section>
+
+          <section class="report-card">
+            <div class="report-copy"><span class="report-icon">!</span><div><h3>Заметили жаркий участок?</h3><p>Одна отметка поможет городу.</p></div></div>
+            <button class="report-button" id="reportButton" type="button"><span>＋</span> Сообщить о жаре</button>
+            <p class="report-status" id="reportStatus" role="status"></p>
+          </section>
+
+          <section class="city-card">
+            <div class="city-card-heading"><div><span class="section-kicker">ДАННЫЕ ЖИТЕЛЕЙ</span><h3>Городу на заметку</h3></div><span class="city-icon">↗</span></div>
+            <p class="city-summary"><strong id="reportCount">0</strong> отметок о жаре помогают найти места, где нужнее всего тень.</p>
+            <div id="hotspotList" class="hotspot-list"><span class="empty-hotspots">Пока нет отметок — добавьте первую.</span></div>
+          </section>
+
+          <footer class="sidebar-footer"><span class="footer-leaf">✳</span> Дышать свободнее — вместе <span class="footer-credit">Данные: OpenStreetMap · Open-Meteo</span></footer>
+        </aside>
+
+        <section class="map-panel" aria-label="Карта и слои городской среды">
+          <div class="map-toolbar">
+            <div class="map-title"><span class="map-pulse"></span><strong id="mapCityLabel">Алматы</strong><span class="map-separator">/</span><span>Городская карта</span></div>
+            <div class="layer-control" role="group" aria-label="Слои карты">
+              <button type="button" class="layer-chip active" data-layer="green"><span class="layer-dot green-dot"></span>Зелень</button>
+              <button type="button" class="layer-chip active" data-layer="heat"><span class="layer-dot heat-dot"></span>Жара</button>
+              <button type="button" class="layer-chip" data-layer="water"><span class="layer-dot water-dot"></span>Вода</button>
+            </div>
+          </div>
+          <div id="map" role="application" aria-label="Интерактивная карта Алматы"></div>
+          <div class="map-legend"><span class="legend-heading">КОМФОРТ ГОРОДА</span><span><i class="legend-dot legend-cool"></i>Прохладнее</span><span><i class="legend-dot legend-warm"></i>Теплее</span></div>
+          <div class="map-credit">© OpenStreetMap contributors</div>
+          <button class="map-report-button" id="mapReportButton" type="button"><span>＋</span> Отметить жаркое место</button>
+          <div class="map-instruction" id="mapInstruction" hidden>Нажмите на карту, чтобы поставить точку</div>
+        </section>
+      </main>
+      <div class="toast" id="toast" role="status"></div>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
