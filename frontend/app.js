@@ -1,7 +1,7 @@
 const DEFAULT_CITY = { name: 'Алматы', latitude: 43.2389, longitude: 76.8897, zoom: 12 };
 let selectedCity = { ...DEFAULT_CITY };
 const map = L.map('map', { zoomControl: false }).setView([selectedCity.latitude, selectedCity.longitude], selectedCity.zoom);
-L.control.zoom({ position: 'bottomright' }).addTo(map);
+L.control.zoom({ position: 'topright' }).addTo(map);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -11,6 +11,7 @@ const routeLayer = L.featureGroup().addTo(map);
 const greenLayer = L.layerGroup().addTo(map);
 const heatLayer = L.layerGroup().addTo(map);
 const waterLayer = L.layerGroup().addTo(map);
+const userLocationLayer = L.layerGroup().addTo(map);
 let routeData = null;
 let activeRoute = 'cool';
 let transportMode = 'foot';
@@ -21,6 +22,12 @@ let reportTarget = null;
 let toastTimer;
 let cityDataRevision = 0;
 let routeRequestRevision = 0;
+let isLocating = false;
+let mapLocateButton;
+let citySearchTimer;
+let citySearchRevision = 0;
+let citySearchLastRequestAt = 0;
+let citySearchController;
 
 const $ = (id) => document.getElementById(id);
 const startInput = $('startInput');
@@ -34,6 +41,22 @@ const citySearchStatus = $('citySearchStatus');
 const citySearchResults = $('citySearchResults');
 const locateButton = $('locateButton');
 const locationStatus = $('locationStatus');
+
+const LocationControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd() {
+    const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-locate');
+    mapLocateButton = L.DomUtil.create('button', '', container);
+    mapLocateButton.type = 'button';
+    mapLocateButton.title = 'Найти меня на карте';
+    mapLocateButton.setAttribute('aria-label', 'Найти моё местоположение на карте');
+    mapLocateButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2"></circle><path d="M12 2v3m0 14v3M2 12h3m14 0h3"></path></svg>';
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(mapLocateButton, 'click', locateUser);
+    return container;
+  },
+});
+new LocationControl().addTo(map);
 
 async function api(url, options = {}) {
   const response = await fetch(url, options);
@@ -62,6 +85,18 @@ function showToast(message) {
 function updateCityLabels() {
   $('cityLabel').textContent = selectedCity.name;
   $('mapCityLabel').textContent = selectedCity.name;
+  $('map').setAttribute('aria-label', `Интерактивная карта: ${selectedCity.name}`);
+}
+
+function reportCountLabel(count) {
+  const remainder = count % 10;
+  const lastTwoDigits = count % 100;
+  const noun = remainder === 1 && lastTwoDigits !== 11
+    ? 'отметка'
+    : remainder >= 2 && remainder <= 4 && (lastTwoDigits < 12 || lastTwoDigits > 14)
+      ? 'отметки'
+      : 'отметок';
+  return `${count} ${noun}`;
 }
 
 function preferredSearchLanguage() {
@@ -88,8 +123,15 @@ function refreshCityData() {
 }
 
 function closeCityPicker() {
+  window.clearTimeout(citySearchTimer);
+  citySearchRevision += 1;
+  citySearchController?.abort();
   cityPicker.hidden = true;
   cityButton.setAttribute('aria-expanded', 'false');
+  citySearchInput.setAttribute('aria-expanded', 'false');
+  citySearchResults.replaceChildren();
+  $('citySearchButton').disabled = false;
+  $('citySearchButton').removeAttribute('aria-busy');
 }
 
 function selectCity(city) {
@@ -119,47 +161,101 @@ function selectCity(city) {
   showToast(`Карта обновлена: ${selectedCity.name}`);
 }
 
-async function searchCities(event) {
-  event.preventDefault();
+function scheduleCitySearch(immediate = false) {
+  window.clearTimeout(citySearchTimer);
+  citySearchRevision += 1;
+  const revision = citySearchRevision;
   const query = citySearchInput.value.trim();
+  citySearchController?.abort();
+  const searchButton = $('citySearchButton');
+  searchButton.disabled = false;
+  searchButton.removeAttribute('aria-busy');
+  citySearchResults.replaceChildren();
+
   if (query.length < 2) {
-    citySearchStatus.textContent = 'Введите не менее двух символов.';
+    citySearchInput.setAttribute('aria-expanded', 'false');
+    citySearchStatus.textContent = 'Введите не менее двух символов — на любом языке.';
     return;
   }
+
+  citySearchStatus.textContent = immediate
+    ? 'Ищем точные и похожие города…'
+    : 'Вводите название города — покажем подходящие варианты…';
+  citySearchInput.setAttribute('aria-expanded', 'false');
+  citySearchTimer = window.setTimeout(
+    () => requestCitySuggestions(query, revision),
+    immediate ? 0 : 650,
+  );
+}
+
+async function requestCitySuggestions(query, revision) {
+  if (revision !== citySearchRevision) return;
+  const waitForRateLimit = Math.max(0, 1000 - (Date.now() - citySearchLastRequestAt));
+  if (waitForRateLimit) {
+    citySearchTimer = window.setTimeout(
+      () => requestCitySuggestions(query, revision),
+      waitForRateLimit,
+    );
+    return;
+  }
+
   const searchButton = $('citySearchButton');
+  const controller = new AbortController();
+  citySearchController = controller;
+  citySearchLastRequestAt = Date.now();
   searchButton.disabled = true;
-  citySearchStatus.textContent = 'Ищем город…';
-  citySearchResults.replaceChildren();
+  searchButton.setAttribute('aria-busy', 'true');
   try {
     const parameters = new URLSearchParams({
       q: query,
       language: preferredSearchLanguage(),
     });
-    const results = await api(`/api/cities?${parameters}`);
+    const results = await api(`/api/cities?${parameters}`, { signal: controller.signal });
+    if (revision !== citySearchRevision) return;
     if (!results.length) {
-      citySearchStatus.textContent = 'Город не найден. Проверьте название и попробуйте ещё раз.';
+        citySearchStatus.textContent = `По запросу «${query}» города не найдены. Попробуйте другое написание или язык.`;
       return;
     }
-    citySearchStatus.textContent = 'Выберите город из списка:';
+    const exactCount = results.filter((city) => city.match_type === 'exact').length;
+    citySearchStatus.textContent = exactCount
+        ? 'Точное совпадение показано первым. Остальные результаты ранжированы по запросу:'
+        : 'Города, наиболее подходящие к запросу. Уточните страну, если вариантов несколько:';
     const entries = results.map((city) => {
       const item = document.createElement('li');
       const button = document.createElement('button');
       button.type = 'button';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', 'false');
       const name = document.createElement('strong');
       name.textContent = city.name;
       const details = document.createElement('small');
       details.textContent = city.display_name;
-      button.append(name, details);
+      const match = document.createElement('span');
+      match.className = `city-match${city.match_type === 'exact' ? ' exact' : ''}`;
+      match.textContent = city.match_type === 'exact' ? 'Точное совпадение' : 'Результат поиска';
+      button.append(name, match, details);
       button.addEventListener('click', () => selectCity(city));
       item.append(button);
       return item;
     });
     citySearchResults.replaceChildren(...entries);
+    citySearchInput.setAttribute('aria-expanded', 'true');
   } catch (error) {
-    citySearchStatus.textContent = error.message;
+    if (error.name !== 'AbortError' && revision === citySearchRevision) {
+      citySearchStatus.textContent = error.message;
+    }
   } finally {
-    searchButton.disabled = false;
+    if (revision === citySearchRevision) {
+      searchButton.disabled = false;
+      searchButton.removeAttribute('aria-busy');
+      citySearchInput.setAttribute('aria-expanded', String(citySearchResults.childElementCount > 0));
+    }
   }
+}
+
+function searchCities(event) {
+  event.preventDefault();
+  scheduleCitySearch(true);
 }
 
 function markerIcon(label, isEnd = false) {
@@ -278,13 +374,17 @@ function drawRoutes() {
   });
   drawRoutePoints();
   if (!routeData) return;
-  const selectedIds = new Set([routeData.cool_route_id, routeData.normal_route_id]);
+  const selectedIds = new Set([
+    routeData.cool_route_id,
+    routeData.ordinary_route_id,
+    routeData.short_route_id,
+  ]);
+  const activeRouteId = routeData[`${activeRoute}_route_id`];
   for (const route of routeData.routes) {
     if (!selectedIds.has(route.id)) continue;
-    const isActive = route.id === (activeRoute === 'cool' ? routeData.cool_route_id : routeData.normal_route_id);
-    const isCool = route.id === routeData.cool_route_id;
+    const isActive = route.id === activeRouteId;
     const line = L.geoJSON({ type: 'LineString', coordinates: route.geometry }, {
-      style: { color: isCool ? '#2c875a' : '#82928a', weight: isActive ? 6 : 4, opacity: isActive ? 0.9 : 0.48, dashArray: isActive ? null : '7 8' },
+      style: { color: isActive ? '#2c875a' : '#82928a', weight: isActive ? 6 : 4, opacity: isActive ? 0.9 : 0.48, dashArray: isActive ? null : '7 8' },
     });
     routeLayer.addLayer(line);
   }
@@ -294,19 +394,32 @@ function drawRoutes() {
 
 function updateRouteCards() {
   const cool = routeData.routes.find((route) => route.id === routeData.cool_route_id);
-  const normal = routeData.routes.find((route) => route.id === routeData.normal_route_id);
+  const ordinary = routeData.routes.find((route) => route.id === routeData.ordinary_route_id);
+  const short = routeData.routes.find((route) => route.id === routeData.short_route_id);
   const environmentSummary = cool.green_points === null
     ? 'Экоданные временно недоступны'
     : `${cool.green_points} зелёных зон · ${cool.water_points} мест с водой`;
   const greenSeparator = environmentSummary ? ` · ${environmentSummary}` : '';
   $('coolMeta').textContent = `${formatDistance(cool.distance)} · ${formatTime(cool.duration)}${greenSeparator}`;
   $('coolScore').textContent = `${cool.comfort}/100`;
-  $('normalMeta').textContent = cool.id === normal.id
-    ? `${formatDistance(normal.distance)} · совпадает с прохладным`
-    : `${formatDistance(normal.distance)} · ${formatTime(normal.duration)}`;
-  $('normalScore').textContent = `${normal.comfort}/100`;
+  $('ordinaryMeta').textContent = ordinary.id === cool.id
+    ? `${formatDistance(ordinary.distance)} · совпадает с прохладным`
+    : ordinary.id === short.id
+      ? `${formatDistance(ordinary.distance)} · совпадает с коротким`
+      : `${formatDistance(ordinary.distance)} · ${formatTime(ordinary.duration)}`;
+  $('ordinaryScore').textContent = `${ordinary.comfort}/100`;
+  $('shortMeta').textContent = short.id === cool.id
+    ? `${formatDistance(short.distance)} · совпадает с прохладным`
+    : short.id === ordinary.id
+      ? `${formatDistance(short.distance)} · совпадает с обычным`
+      : `${formatDistance(short.distance)} · ${formatTime(short.duration)}`;
+  $('shortScore').textContent = `${short.comfort}/100`;
   $('coolOption').classList.toggle('active', activeRoute === 'cool');
-  $('normalOption').classList.toggle('active', activeRoute === 'normal');
+  $('normalOption').classList.toggle('active', activeRoute === 'ordinary');
+  $('shortOption').classList.toggle('active', activeRoute === 'short');
+  $('coolOption').setAttribute('aria-pressed', String(activeRoute === 'cool'));
+  $('normalOption').setAttribute('aria-pressed', String(activeRoute === 'ordinary'));
+  $('shortOption').setAttribute('aria-pressed', String(activeRoute === 'short'));
   $('routeResults').hidden = false;
   if (cool.green_points === null) showToast('Экоданные недоступны: индекс рассчитан по длине пути и погоде');
   else if (routeData.temperature === null && routeData.weather_warning) {
@@ -380,27 +493,109 @@ function selectTransport(mode) {
 
 function setMapMode(mode) {
   mapSelectionMode = mode;
-  $('mapInstruction').hidden = !mode;
+  const instruction = $('mapInstruction');
+  instruction.hidden = !mode;
+  instruction.textContent = mode === 'report'
+    ? 'Нажмите на карту, чтобы отметить проблему'
+    : mode === 'start'
+      ? 'Нажмите на карту, чтобы выбрать точку отправления'
+      : mode === 'end'
+        ? 'Нажмите на карту, чтобы выбрать точку назначения'
+        : '';
 }
 
 function beginReportMode() {
   setMapMode('report');
-  showToast('Нажмите на карте, чтобы отметить жаркое место');
+  showToast('Нажмите на карте, чтобы отметить место, где нужна прохлада');
+}
+
+function reportCategoryLabel(category) {
+  return {
+    hot: 'Здесь жарко',
+    no_shade: 'Не хватает тени',
+    no_water: 'Нет питьевой воды',
+  }[category] || 'Сообщение жителя';
+}
+
+function reportPopupContent(category, note = '') {
+  const content = document.createElement('div');
+  const label = document.createElement('strong');
+  label.textContent = reportCategoryLabel(category);
+  content.append(label);
+  if (note) {
+    const noteText = document.createElement('p');
+    noteText.className = 'report-popup-note';
+    noteText.textContent = note;
+    content.append(noteText);
+  }
+  return content;
+}
+
+function addHeatReportMarker(report) {
+  const markerClass = report.category === 'hot'
+    ? 'hot'
+    : report.category === 'no_water'
+      ? 'water'
+      : 'shade';
+  L.marker([report.latitude, report.longitude], {
+    icon: L.divIcon({
+      className: '',
+      html: `<span class="custom-marker ${markerClass}"></span>`,
+      iconSize: [19, 19],
+      iconAnchor: [9, 9],
+    }),
+  }).bindPopup(reportPopupContent(report.category, report.note)).addTo(heatLayer);
+}
+
+function openReportConfirmation(latlng) {
+  reportTarget = { latitude: latlng.lat, longitude: latlng.lng };
+  const form = document.createElement('form');
+  form.className = 'report-popup-form';
+  const heading = document.createElement('strong');
+  heading.textContent = 'Что здесь нужно улучшить?';
+
+  const categoryLabel = document.createElement('label');
+  categoryLabel.textContent = 'Проблема';
+  const category = document.createElement('select');
+  category.name = 'category';
+  [
+    ['hot', 'Сильная жара'],
+    ['no_shade', 'Не хватает тени'],
+    ['no_water', 'Нет питьевой воды'],
+  ].forEach(([value, text]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = text;
+    category.append(option);
+  });
+  categoryLabel.append(category);
+
+  const noteLabel = document.createElement('label');
+  noteLabel.textContent = 'Комментарий (необязательно)';
+  const note = document.createElement('textarea');
+  note.name = 'note';
+  note.maxLength = 240;
+  note.rows = 2;
+  note.placeholder = 'Например: после полудня здесь совсем нет тени';
+  noteLabel.append(note);
+
+  const submit = document.createElement('button');
+  submit.className = 'popup-report-button';
+  submit.type = 'submit';
+  submit.textContent = 'Отправить отметку';
+  form.append(heading, categoryLabel, noteLabel, submit);
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    submitHeatReport(category.value, note.value, submit);
+  });
+  L.popup().setLatLng(latlng).setContent(form).openOn(map);
 }
 
 map.on('click', (event) => {
   if (!mapSelectionMode) return;
   if (mapSelectionMode === 'report') {
-    reportTarget = { latitude: event.latlng.lat, longitude: event.latlng.lng };
     setMapMode(null);
-    L.popup()
-      .setLatLng(event.latlng)
-      .setContent('<strong>Здесь жарко?</strong><br><button class="popup-report-button" id="confirmHeatReport">＋ Отправить отметку</button>')
-      .openOn(map);
-    window.setTimeout(() => {
-      const button = $('confirmHeatReport');
-      if (button) button.addEventListener('click', submitHeatReport);
-    }, 0);
+    openReportConfirmation(event.latlng);
     return;
   }
   const selectedMode = mapSelectionMode;
@@ -420,16 +615,58 @@ function bindRouteOption(id, which) {
   });
 }
 bindRouteOption('coolOption', 'cool');
-bindRouteOption('normalOption', 'normal');
+bindRouteOption('normalOption', 'ordinary');
+bindRouteOption('shortOption', 'short');
 
 $('routeForm').addEventListener('submit', findRoutes);
+$('swapLocations').addEventListener('click', () => {
+  const startValue = startInput.value;
+  const startResolvedName = startInput.dataset.resolvedName || '';
+  startInput.value = endInput.value;
+  startInput.dataset.resolvedName = endInput.dataset.resolvedName || '';
+  endInput.value = startValue;
+  endInput.dataset.resolvedName = startResolvedName;
+  [startPoint, endPoint] = [endPoint, startPoint];
+  setMapMode(null);
+  routeError.textContent = '';
+  invalidateRouteData();
+  drawRoutePoints();
+});
 $('footMode').addEventListener('click', () => selectTransport('foot'));
 $('bikeMode').addEventListener('click', () => selectTransport('bike'));
 $('citySearchForm').addEventListener('submit', searchCities);
+citySearchInput.addEventListener('input', () => scheduleCitySearch());
+citySearchInput.addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown') {
+    const firstResult = citySearchResults.querySelector('button');
+    if (firstResult) {
+      event.preventDefault();
+      firstResult.focus();
+    }
+  }
+});
+citySearchResults.addEventListener('keydown', (event) => {
+  const option = event.target.closest('button');
+  if (!option) return;
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    const options = [...citySearchResults.querySelectorAll('button')];
+    const offset = event.key === 'ArrowDown' ? 1 : -1;
+    const next = options[(options.indexOf(option) + offset + options.length) % options.length];
+    event.preventDefault();
+    options.forEach((candidate) => candidate.setAttribute('aria-selected', String(candidate === next)));
+    next.focus();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    citySearchInput.focus();
+  }
+});
 cityButton.addEventListener('click', () => {
   cityPicker.hidden = !cityPicker.hidden;
   cityButton.setAttribute('aria-expanded', String(!cityPicker.hidden));
-  if (!cityPicker.hidden) citySearchInput.focus();
+  if (!cityPicker.hidden) {
+    citySearchInput.focus();
+    if (citySearchInput.value.trim().length >= 2) scheduleCitySearch(true);
+  }
 });
 document.addEventListener('click', (event) => {
   if (!cityPicker.contains(event.target) && !cityButton.contains(event.target)) closeCityPicker();
@@ -466,80 +703,122 @@ $('clearRoutes').addEventListener('click', () => {
 });
 $('mapReportButton').addEventListener('click', beginReportMode);
 $('reportButton').addEventListener('click', beginReportMode);
-$('locateButton').addEventListener('click', () => {
+function setLocating(isBusy) {
+  isLocating = isBusy;
+  locateButton.disabled = isBusy;
+  mapLocateButton.disabled = isBusy;
+  mapLocateButton.classList.toggle('loading', isBusy);
+  mapLocateButton.setAttribute('aria-busy', String(isBusy));
+}
+
+function showLocationError(message) {
+  locationStatus.textContent = message;
+  locationStatus.classList.add('error');
+  showToast(message);
+}
+
+function locateUser() {
+  if (isLocating) return;
   locationStatus.classList.remove('error');
   if (!navigator.geolocation) {
-    locationStatus.textContent = 'Этот браузер не поддерживает определение местоположения.';
-    locationStatus.classList.add('error');
+    showLocationError('Этот браузер не поддерживает определение местоположения.');
     return;
   }
   if (!window.isSecureContext) {
-    locationStatus.textContent = 'Геолокация работает только на localhost или защищённом HTTPS-сайте.';
-    locationStatus.classList.add('error');
+    showLocationError('Геолокация работает только на localhost или защищённом HTTPS-сайте.');
     return;
   }
-  locateButton.disabled = true;
+  setLocating(true);
   locationStatus.textContent = 'Определяем ваше местоположение… Разрешите доступ, если браузер спросит.';
   navigator.geolocation.getCurrentPosition(
     (position) => {
       const latlng = { lat: position.coords.latitude, lng: position.coords.longitude };
+      if (!Number.isFinite(latlng.lat) || !Number.isFinite(latlng.lng)
+        || Math.abs(latlng.lat) > 90 || Math.abs(latlng.lng) > 180) {
+        setLocating(false);
+        showLocationError('Браузер вернул некорректные координаты. Попробуйте ещё раз.');
+        return;
+      }
+      const accuracy = Math.round(position.coords.accuracy);
       setPoint('start', latlng, 'Моё местоположение');
       selectedCity = {
-        name: 'Рядом со мной',
+        name: 'Моё местоположение',
         latitude: latlng.lat,
         longitude: latlng.lng,
-        zoom: 15,
+        zoom: 17,
       };
       updateCityLabels();
-      map.setView(latlng, 15);
+      userLocationLayer.clearLayers();
+      L.circle(latlng, {
+        radius: Math.max(accuracy, 20),
+        color: '#3188bd',
+        weight: 1,
+        fillColor: '#55a9d8',
+        fillOpacity: 0.12,
+      }).addTo(userLocationLayer);
+      L.marker(latlng, {
+        icon: L.divIcon({
+          className: 'user-location-icon',
+          html: '<span class="user-location-dot"></span>',
+          iconSize: [26, 26],
+          iconAnchor: [13, 13],
+        }),
+        title: `Вы здесь · точность около ${accuracy} м`,
+      }).bindPopup(`Вы здесь · точность около ${accuracy} м`).addTo(userLocationLayer);
+      map.setView(latlng, Math.max(map.getZoom(), 17), { animate: true });
       setMapMode('end');
       endInput.focus();
-      const accuracy = Math.round(position.coords.accuracy);
       locationStatus.textContent = `Местоположение определено (точность около ${accuracy} м). Введите точку назначения.`;
       refreshCityData();
-      locateButton.disabled = false;
+      setLocating(false);
+      showToast('Вы на карте. Масштаб увеличен для удобного выбора места.');
     },
     (error) => {
-      locationStatus.textContent = error.code === 1
+      const message = error.code === 1
         ? 'Доступ запрещён. Разрешите геолокацию для этого сайта в настройках браузера.'
         : error.code === 2
           ? 'Не удалось определить координаты. Проверьте GPS или подключение к сети.'
           : 'Определение местоположения заняло слишком много времени. Попробуйте ещё раз.';
-      locationStatus.classList.add('error');
-      locateButton.disabled = false;
+      setLocating(false);
+      showLocationError(message);
     },
-    { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 },
+    { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 },
   );
-});
+}
+
+locateButton.addEventListener('click', locateUser);
 
 document.querySelectorAll('.layer-chip').forEach((button) => {
   button.addEventListener('click', () => {
     const layerName = button.dataset.layer;
     const isActive = button.classList.toggle('active');
+    button.setAttribute('aria-pressed', String(isActive));
     const layer = { green: greenLayer, heat: heatLayer, water: waterLayer }[layerName];
     if (isActive) layer.addTo(map);
     else map.removeLayer(layer);
   });
 });
 
-async function submitHeatReport() {
+async function submitHeatReport(category, note, submitButton) {
   if (!reportTarget) return;
+  submitButton.disabled = true;
+  submitButton.textContent = 'Отправляем…';
   try {
     const saved = await api('/api/reports', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...reportTarget, category: 'hot', note: '' }),
+      body: JSON.stringify({ ...reportTarget, category, note: note.trim() }),
     });
-    L.marker([saved.latitude, saved.longitude], {
-      icon: L.divIcon({ className: '', html: '<span class="custom-marker hot"></span>', iconSize: [19, 19], iconAnchor: [9, 9] }),
-    }).bindPopup('Отметка жителя: здесь жарко').addTo(heatLayer);
+    addHeatReportMarker(saved);
     map.closePopup();
     $('reportStatus').textContent = 'Спасибо! Отметка добавлена на карту.';
-    showToast('Спасибо, отметка о жаре отправлена');
+    showToast('Спасибо, сообщение отправлено');
     reportTarget = null;
     await loadInsights();
   } catch (error) {
     showToast(error.message);
+    submitButton.disabled = false;
+    submitButton.textContent = 'Отправить отметку';
   }
 }
 
@@ -574,12 +853,7 @@ async function loadReports(revision = cityDataRevision) {
     const reports = await api(`/api/reports?${query}`);
     if (revision !== cityDataRevision) return;
     reports.forEach((report) => {
-      const isHot = report.category === 'hot';
-      const className = isHot ? 'custom-marker hot' : report.category === 'no_water' ? 'custom-marker water' : 'custom-marker';
-      const label = isHot ? 'Здесь жарко' : report.category === 'no_water' ? 'Нет питьевой воды' : 'Не хватает тени';
-      L.marker([report.latitude, report.longitude], {
-        icon: L.divIcon({ className: '', html: `<span class="${className}"></span>`, iconSize: [19, 19], iconAnchor: [9, 9] }),
-      }).bindPopup(label).addTo(heatLayer);
+      addHeatReportMarker(report);
     });
   } catch (error) {
     if (revision === cityDataRevision) showToast(error.message);
@@ -594,7 +868,7 @@ async function loadInsights(revision = cityDataRevision) {
     });
     const insights = await api(`/api/city-insights?${query}`);
     if (revision !== cityDataRevision) return;
-    $('reportCount').textContent = insights.total_reports;
+    $('reportCount').textContent = reportCountLabel(insights.total_reports);
     const list = $('hotspotList');
     if (!insights.hotspots.length) {
       list.innerHTML = '<span class="empty-hotspots">Пока нет отметок — добавьте первую.</span>';
@@ -606,7 +880,7 @@ async function loadInsights(revision = cityDataRevision) {
       const place = document.createElement('span');
       place.textContent = `${Number(spot.latitude).toFixed(3)}, ${Number(spot.longitude).toFixed(3)}`;
       const count = document.createElement('strong');
-      count.textContent = `${spot.reports} ${spot.reports === 1 ? 'отметка' : 'отметки'}`;
+      count.textContent = reportCountLabel(spot.reports);
       row.append(place, count);
       return row;
     }));

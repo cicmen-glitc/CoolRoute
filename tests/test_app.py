@@ -46,6 +46,17 @@ class RouteHelpersTests(unittest.TestCase):
         self.assertEqual(parameters["accept-language"], [language])
         self.assertEqual(parameters["featuretype"], ["city"])
 
+    def test_city_search_requests_name_variants_for_multilingual_matching(self):
+        url = build_nominatim_url(
+            "Almaty",
+            limit=10,
+            language="en,ru",
+            featuretype="city",
+            namedetails=True,
+        )
+        parameters = parse_qs(urlparse(url).query)
+        self.assertEqual(parameters["namedetails"], ["1"])
+
     def test_nominatim_search_rejects_malformed_language_preferences(self):
         with self.assertRaises(HTTPException):
             build_nominatim_url("Almaty", limit=5, language="en\r\nInjected: true")
@@ -59,9 +70,14 @@ class RouteHelpersTests(unittest.TestCase):
                     "code": "Ok",
                     "routes": [
                         {
+                            "distance": 1500,
+                            "duration": 600,
+                            "geometry": {"coordinates": [[76.9, 43.2], [76.91, 43.21]]},
+                        },
+                        {
                             "distance": 1000,
                             "duration": 300,
-                            "geometry": {"coordinates": [[76.9, 43.2], [76.91, 43.21]]},
+                            "geometry": {"coordinates": [[76.9, 43.2], [76.905, 43.205], [76.91, 43.21]]},
                         }
                     ],
                 }
@@ -76,17 +92,64 @@ class RouteHelpersTests(unittest.TestCase):
                 mode="bike",
             )
         self.assertEqual(response["mode"], "bike")
-        self.assertEqual(len(response["routes"]), 1)
+        self.assertEqual(len(response["routes"]), 2)
+        self.assertEqual(response["ordinary_route_id"], 0)
+        self.assertEqual(response["short_route_id"], 1)
+        self.assertEqual(response["normal_route_id"], response["short_route_id"])
 
     def test_city_search_returns_only_city_places(self):
         response = [
             {"category": "historic", "type": "castle", "lat": "1", "lon": "2"},
+            {"category": "place", "type": "town", "name": "Акмол", "display_name": "Акмол, Казахстан", "lat": "51.2", "lon": "71.5"},
             {"category": "place", "type": "city", "name": "Астана", "display_name": "Астана, Казахстан", "lat": "51.1", "lon": "71.4"},
         ]
         with patch("backend.app.fetch_json", return_value=response):
             results = cities("Астана")
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["name"], "Астана")
+        self.assertEqual(results[0]["match_type"], "exact")
+        self.assertEqual(results[1]["match_type"], "similar")
+
+    def test_city_search_identifies_unicode_exact_matches(self):
+        response = [
+            {
+                "category": "place",
+                "type": "city",
+                "name": "\uff21\uff4c\uff4d\uff41\uff54\uff59",
+                "display_name": "\uff21\uff4c\uff4d\uff41\uff54\uff59, Kazakhstan",
+                "lat": "43.2389",
+                "lon": "76.8897",
+            }
+        ]
+        with patch("backend.app.fetch_json", return_value=response):
+            results = cities("Almaty")
+        self.assertEqual(results[0]["match_type"], "exact")
+
+    def test_city_search_matches_alternate_name_and_skips_invalid_locations(self):
+        response = [
+            {
+                "category": "place",
+                "type": "city",
+                "name": "Алматы",
+                "display_name": "Алматы, Казахстан",
+                "namedetails": {"name:en": "Almaty", "name:kk": "Алматы"},
+                "lat": "43.2389",
+                "lon": "76.8897",
+            },
+            {
+                "category": "place",
+                "type": "city",
+                "name": "Invalid city",
+                "display_name": "Invalid city",
+                "lat": "NaN",
+                "lon": "0",
+            },
+        ]
+        with patch("backend.app.fetch_json", return_value=response):
+            results = cities("Almaty", "en,ru")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "Алматы")
+        self.assertEqual(results[0]["match_type"], "exact")
 
     def test_city_and_address_search_forward_unicode_and_language(self):
         query = "\u6771\u4eac"

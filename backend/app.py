@@ -5,6 +5,7 @@ import math
 import os
 import re
 import sqlite3
+import unicodedata
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated, Generator, Literal
@@ -191,6 +192,7 @@ def build_nominatim_url(
     limit: int,
     language: str | None,
     featuretype: str | None = None,
+    namedetails: bool = False,
 ) -> str:
     parameters: dict[str, str] = {
         "q": query,
@@ -204,7 +206,17 @@ def build_nominatim_url(
         parameters["accept-language"] = language
     if featuretype:
         parameters["featuretype"] = featuretype
+    if namedetails:
+        parameters["namedetails"] = "1"
     return "https://nominatim.openstreetmap.org/search?" + urlencode(parameters)
+
+
+def normalize_search_text(value: str) -> str:
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFKC", value).casefold()
+        if character.isalnum()
+    )
 
 
 @app.get("/", include_in_schema=False)
@@ -242,6 +254,7 @@ def cities(
         limit=10,
         featuretype="city",
         language=language,
+        namedetails=True,
     )
     results = fetch_json(url)
     if not isinstance(results, list):
@@ -250,6 +263,7 @@ def cities(
     supported_types = {"city", "town", "village", "municipality"}
     found = []
     seen: set[tuple[float, float]] = set()
+    normalized_query = normalize_search_text(q)
     for item in results:
         if (
             not isinstance(item, dict)
@@ -259,20 +273,43 @@ def cities(
             or "lon" not in item
         ):
             continue
-        latitude = float(item["lat"])
-        longitude = float(item["lon"])
+        try:
+            latitude = float(item["lat"])
+            longitude = float(item["lon"])
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(latitude) and math.isfinite(longitude)):
+            continue
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            continue
         location = (latitude, longitude)
         if location in seen:
             continue
         seen.add(location)
+        name = item.get("name") or item.get("display_name", "Город")
+        display_name = item.get("display_name", name)
+        candidates = [name, display_name.split(",", maxsplit=1)[0]]
+        name_details = item.get("namedetails")
+        if isinstance(name_details, dict):
+            candidates.extend(
+                alias for alias in name_details.values()
+                if isinstance(alias, str)
+            )
+        exact_match = any(
+            normalized_query == normalize_search_text(candidate)
+            for candidate in candidates
+            if isinstance(candidate, str)
+        )
         found.append(
             {
-                "name": item.get("name") or item.get("display_name", "Город"),
-                "display_name": item.get("display_name", item.get("name", "Город")),
+                "name": name,
+                "display_name": display_name,
                 "latitude": str(latitude),
                 "longitude": str(longitude),
+                "match_type": "exact" if exact_match else "similar",
             }
         )
+    found.sort(key=lambda city: city["match_type"] != "exact")
     return found
 
 
@@ -376,11 +413,14 @@ def routes(
         )
     if not prepared:
         raise HTTPException(status_code=502, detail="Маршрутизатор вернул некорректные данные.")
+    ordinary = prepared[0]
     shortest = min(prepared, key=lambda route: route["distance"])
     cool = max(prepared, key=lambda route: route["comfort"])
     return {
         "routes": prepared,
         "mode": mode,
+        "ordinary_route_id": ordinary["id"],
+        "short_route_id": shortest["id"],
         "normal_route_id": shortest["id"],
         "cool_route_id": cool["id"],
         "temperature": temperature,
