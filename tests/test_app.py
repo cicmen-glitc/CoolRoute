@@ -211,8 +211,8 @@ class RouteHelpersTests(unittest.TestCase):
                 )
                 create_report(
                     HeatReport(
-                        latitude=51.1694,
-                        longitude=71.4491,
+                        latitude=43.4389,
+                        longitude=77.0897,
                         category="hot",
                     )
                 )

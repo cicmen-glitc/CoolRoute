@@ -609,9 +609,18 @@ button { cursor: pointer; }
 }
 #map .leaflet-control-attribution {
   border-top-left-radius: 8px;
+  padding: 1px 3px;
   background: rgba(255, 255, 255, 0.82);
   color: #718078;
+  font-size: 7px;
+  line-height: 1;
   backdrop-filter: blur(8px);
+}
+#map .leaflet-bottom.leaflet-right {
+  right: 14px;
+}
+#map .leaflet-bottom.leaflet-right .leaflet-control {
+  margin-right: 0;
 }
 .map-toolbar {
   position: absolute;
@@ -679,17 +688,6 @@ button { cursor: pointer; }
 .legend-dot { width: 7px; height: 7px; display: inline-block; margin-right: 5px; border-radius: 50%; }
 .legend-cool { background: #70ad7a; }
 .legend-warm { background: #e69b68; }
-.map-credit {
-  position: absolute;
-  right: 7px;
-  bottom: 3px;
-  z-index: 400;
-  padding: 3px 5px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, .78);
-  color: #63716a;
-  font-size: 8px;
-}
 .map-report-button {
   position: absolute;
   right: 14px;
@@ -904,6 +902,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .layer-control { min-height: 34px; }
   .layer-chip { height: 26px; padding: 0 7px; }
   .map-panel .leaflet-top.leaflet-right { top: 80px; }
+  #map .leaflet-bottom.leaflet-right { right: 8px; }
   .map-legend { bottom: 12px; left: 8px; gap: 7px; padding: 8px; }
   .legend-heading { display: none; }
   .map-report-button { right: 8px; bottom: 10px; height: 35px; }

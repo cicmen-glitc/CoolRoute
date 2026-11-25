@@ -39,11 +39,24 @@ def fetch_json(url: str, *, timeout: int = 12) -> object:
         ) from exc
 
 
+def distance_km(latitude_a: float, longitude_a: float, latitude_b: float, longitude_b: float) -> float:
+    latitude_delta = math.radians(latitude_b - latitude_a)
+    longitude_delta = math.radians(longitude_b - longitude_a)
+    haversine = (
+        math.sin(latitude_delta / 2) ** 2
+        + math.cos(math.radians(latitude_a))
+        * math.cos(math.radians(latitude_b))
+        * math.sin(longitude_delta / 2) ** 2
+    )
+    return 6371 * 2 * math.asin(math.sqrt(min(1.0, haversine)))
+
+
 @contextmanager
 def connect_database() -> Generator[sqlite3.Connection, None, None]:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH)
     connection.row_factory = sqlite3.Row
+    connection.create_function("distance_km", 4, distance_km)
     try:
         with connection:
             yield connection
@@ -476,22 +489,13 @@ def report_bounds(
     latitude: float | None,
     longitude: float | None,
     radius_km: float,
-) -> tuple[float, float, float, float] | None:
+) -> tuple[float, float] | None:
     if latitude is None and longitude is None:
         return None
     if latitude is None or longitude is None:
         raise HTTPException(status_code=422, detail="Для фильтра по городу передайте широту и долготу.")
-    latitude_delta = radius_km / 111.32
-    longitude_delta = min(
-        180,
-        radius_km / max(111.32 * abs(math.cos(math.radians(latitude))), 0.01),
-    )
-    return (
-        max(-90, latitude - latitude_delta),
-        min(90, latitude + latitude_delta),
-        max(-180, longitude - longitude_delta),
-        min(180, longitude + longitude_delta),
-    )
+    latitude_delta = radius_km / 110.5
+    return max(-90, latitude - latitude_delta), min(90, latitude + latitude_delta)
 
 
 @app.get("/api/reports")
@@ -508,8 +512,11 @@ def list_reports(
         """
         parameters: tuple[float, ...] = ()
         if bounds is not None:
-            query += " WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?"
-            parameters = bounds
+            query += """
+                WHERE latitude BETWEEN ? AND ?
+                    AND distance_km(latitude, longitude, ?, ?) <= ?
+            """
+            parameters = (*bounds, latitude, longitude, radius_km)
         query += " ORDER BY id DESC LIMIT 200"
         rows = connection.execute(query, parameters).fetchall()
     return [dict(row) for row in rows]
@@ -548,8 +555,11 @@ def city_insights(
         where = ""
         parameters: tuple[float, ...] = ()
         if bounds is not None:
-            where = " WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?"
-            parameters = bounds
+            where = """
+                WHERE latitude BETWEEN ? AND ?
+                    AND distance_km(latitude, longitude, ?, ?) <= ?
+            """
+            parameters = (*bounds, latitude, longitude, radius_km)
         total = connection.execute(f"SELECT COUNT(*) FROM heat_reports{where}", parameters).fetchone()[0]
         hotspots = connection.execute(
             f"""
